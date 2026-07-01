@@ -3,9 +3,13 @@
 // vars only — no code change:
 //
 //   LLM_PROVIDER   deepseek | nvidia | moonshot | openrouter   (default: deepseek)
-//   LLM_API_KEY    the provider's key      (falls back to DEEPSEEK_API_KEY)
+//   LLM_API_KEY    explicit key override. Otherwise the active provider's own key
+//                  var is used: DEEPSEEK_API_KEY / NVIDIA_API_KEY /
+//                  KIMI_API_KEY (or MOONSHOT_API_KEY) / OPENROUTER_API_KEY.
 //   LLM_MODEL      model id override        (sensible default per provider)
 //   LLM_BASE_URL   base URL override        (optional; overrides the preset)
+//   LLM_TEMPERATURE  sampling temperature   (default 0.5; some models require 1)
+//   LLM_MAX_TOKENS   completion token cap   (raise for reasoning models like Kimi)
 //   LLM_JSON_MODE  "false" to skip response_format if a provider rejects it
 //   LLM_EXTRA_BODY JSON merged into the request body — for provider-specific
 //                  params, e.g. '{"chat_template_kwargs":{"thinking":false}}'
@@ -18,18 +22,31 @@ interface ProviderPreset {
 const PRESETS: Record<string, ProviderPreset> = {
   deepseek: { baseUrl: "https://api.deepseek.com", defaultModel: "deepseek-chat" },
   nvidia: { baseUrl: "https://integrate.api.nvidia.com/v1", defaultModel: "moonshotai/kimi-k2-instruct" },
-  moonshot: { baseUrl: "https://api.moonshot.ai/v1", defaultModel: "kimi-k2-0711-preview" },
+  // moonshot-v1-auto is fast & non-reasoning (ideal for narration). The kimi-k2.x
+  // models are reasoning models — much slower (10-30s), set them explicitly if wanted.
+  moonshot: { baseUrl: "https://api.moonshot.ai/v1", defaultModel: "moonshot-v1-auto" },
   openrouter: { baseUrl: "https://openrouter.ai/api/v1", defaultModel: "moonshotai/kimi-k2" },
+};
+
+// Per-provider key env vars, so all keys can live in env and you flip with LLM_PROVIDER.
+const KEY_ENV: Record<string, string[]> = {
+  deepseek: ["DEEPSEEK_API_KEY"],
+  nvidia: ["NVIDIA_API_KEY"],
+  moonshot: ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
 };
 
 function resolveConfig() {
   const provider = (process.env.LLM_PROVIDER ?? "deepseek").toLowerCase();
   const preset = PRESETS[provider];
+  const providerKey = (KEY_ENV[provider] ?? []).map((name) => process.env[name]).find(Boolean);
   return {
     provider,
     baseUrl: process.env.LLM_BASE_URL ?? preset?.baseUrl,
     model: process.env.LLM_MODEL ?? preset?.defaultModel,
-    apiKey: process.env.LLM_API_KEY ?? process.env.DEEPSEEK_API_KEY,
+    apiKey: process.env.LLM_API_KEY ?? providerKey ?? process.env.DEEPSEEK_API_KEY,
+    temperature: process.env.LLM_TEMPERATURE ? Number(process.env.LLM_TEMPERATURE) : 0.5,
+    maxTokensEnv: process.env.LLM_MAX_TOKENS ? parseInt(process.env.LLM_MAX_TOKENS, 10) : null,
     jsonMode: (process.env.LLM_JSON_MODE ?? "true").toLowerCase() !== "false",
     extraBody: parseExtraBody(process.env.LLM_EXTRA_BODY),
   };
@@ -52,21 +69,22 @@ function parseExtraBody(raw: string | undefined): Record<string, unknown> {
 export async function callLLMJSON(
   system: string,
   user: string,
-  maxTokens = 450,
+  maxTokens = 800,
 ): Promise<Record<string, unknown>> {
-  const { provider, baseUrl, model, apiKey, jsonMode, extraBody } = resolveConfig();
-  if (!apiKey) throw new Error("Missing LLM_API_KEY (or DEEPSEEK_API_KEY)");
+  const { provider, baseUrl, model, apiKey, temperature, maxTokensEnv, jsonMode, extraBody } =
+    resolveConfig();
+  if (!apiKey) throw new Error(`Missing API key for provider "${provider}"`);
   if (!baseUrl) throw new Error(`Unknown LLM_PROVIDER "${provider}" and no LLM_BASE_URL set`);
   if (!model) throw new Error("No LLM_MODEL set for this provider");
 
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(45_000),
     body: JSON.stringify({
       model,
-      temperature: 0.5,
-      max_tokens: maxTokens,
+      temperature,
+      max_tokens: maxTokensEnv ?? maxTokens,
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },

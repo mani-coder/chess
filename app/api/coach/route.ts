@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { callLLMJSON, levelInstruction } from "@/lib/llm-provider";
 
+// Reasoning models (e.g. Kimi) can take 10-15s; keep the function alive long enough.
+export const maxDuration = 60;
+
 interface CoachRequest {
   fen: string;
   sideToMove: "w" | "b";
