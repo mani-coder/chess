@@ -77,8 +77,11 @@ Two independent dials:
       (the coach PV) vs. your played move + its continuation, with move arrows, last-move
       highlights, step controls (◀ ▶ ⏮ / auto-play / arrow keys), clickable move-list SANs,
       and eval contrast per line. *The differentiator.* Still no LLM.
-- [ ] **Phase 4 — DeepSeek narration.** API route + prompt fed by engine data + caching.
-      Beginner/intermediate depth dial.
+- [x] **Phase 4 — DeepSeek narration.** Two server API routes (key stays server-side):
+      `/api/explain` narrates why the better move wins + a reusable principle (in the review
+      modal); `/api/coach` gives on-demand positional guidance that trains thinking WITHOUT
+      revealing the move. Engine facts in → plain language out. Per-position caching (client +
+      server). Beginner/intermediate depth derived from difficulty.
 - [ ] **Phase 5 — Adaptivity & polish.** Auto-tune bot strength + explanation depth from
       recent accuracy, game history, lessons/puzzle mode.
 

@@ -10,11 +10,13 @@ import { uciToMove } from "@/lib/uci";
 import {
   classify,
   toComparable,
+  formatEval,
   CLASS_META,
   SEVERITY,
   type ClassifiedMove,
   type Classification,
 } from "@/lib/classify";
+import { fetchGuidance, type Level, type CoachGuidance, type CoachRequest } from "@/lib/llm";
 
 /** Difficulty presets: opponent skill level + per-move think time. */
 const DIFFICULTIES = [
@@ -312,12 +314,26 @@ export function ChessGame() {
     void newGame(color);
   };
 
-  const squareStyles: Record<string, React.CSSProperties> = lastMove
-    ? {
-        [lastMove.from]: { background: "rgba(255, 213, 79, 0.45)" },
-        [lastMove.to]: { background: "rgba(255, 213, 79, 0.55)" },
+  const squareStyles: Record<string, React.CSSProperties> = {};
+  if (lastMove) {
+    squareStyles[lastMove.from] = { background: "rgba(255, 213, 79, 0.45)" };
+    squareStyles[lastMove.to] = { background: "rgba(255, 213, 79, 0.55)" };
+  }
+  // Flag the king in danger: solid red on checkmate, a softer red on plain check.
+  if (gameRef.current.isCheck()) {
+    const inCheck = gameRef.current.turn();
+    let kingSquare: string | undefined;
+    for (const row of gameRef.current.board()) {
+      for (const cell of row) {
+        if (cell && cell.type === "k" && cell.color === inCheck) kingSquare = cell.square;
       }
-    : {};
+    }
+    if (kingSquare) {
+      squareStyles[kingSquare] = gameRef.current.isCheckmate()
+        ? { background: "rgba(220, 38, 38, 0.9)", boxShadow: "inset 0 0 0 3px #dc2626" }
+        : { background: "rgba(220, 38, 38, 0.5)" };
+    }
+  }
 
   const gameOver = gameRef.current.isGameOver();
   const canDrag = ready && !thinking && !gameOver && gameRef.current.turn() === playerColor;
@@ -333,35 +349,119 @@ export function ChessGame() {
   const topTray = trayFor(topColor);
   const bottomTray = trayFor(bottomColor);
 
+  // Beginner/Casual → simpler coaching language; harder presets → intermediate.
+  const level: Level = difficulty === "beginner" || difficulty === "casual" ? "beginner" : "intermediate";
+  const playerToMove = ready && !thinking && !gameOver && gameRef.current.turn() === playerColor;
+
+  // Build the current-position guidance request (lazily, at ask time) from the
+  // coach's analysis of the current position (stored in curEvalRef).
+  const buildGuidanceRequest = (): CoachRequest => {
+    const cur = curEvalRef.current;
+    const sans: string[] = [];
+    try {
+      const tmp = new Chess(cur.fen);
+      for (const u of cur.pv.slice(0, 8)) sans.push(tmp.move(uciToMove(u)).san);
+    } catch {
+      /* PV occasionally has an edge-case move; partial line is fine */
+    }
+    const sign = playerColor === "w" ? 1 : -1;
+    return {
+      fen: cur.fen,
+      sideToMove: playerColor,
+      evalForPlayer: formatEval(
+        cur.whiteCp === null ? null : sign * cur.whiteCp,
+        cur.whiteMate === null ? null : sign * cur.whiteMate,
+      ),
+      bestLineSan: sans,
+      level,
+    };
+  };
+
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 p-4 sm:p-6 lg:flex-row lg:items-start">
-      {/* Captured-piece trays + eval bar + board */}
-      <div className="flex w-full max-w-[600px] flex-1 flex-col gap-1.5">
-        {/* Trays sit inset by the eval-bar width (w-7) + gap (gap-3) = 40px, to align with the board. */}
-        <CapturedTray {...topTray} className="pl-10" />
-        <div className="flex items-stretch gap-3">
-          <EvalBar cp={evalCp} mate={evalMate} orientation={orientation} />
-          <div className="aspect-square w-full">
-            <Chessboard
-              options={{
-                id: "coach-board",
-                position: fen,
-                boardOrientation: orientation,
-                onPieceDrop: handleDrop,
-                allowDragging: canDrag,
-                animationDurationInMs: 200,
-                squareStyles,
-                darkSquareStyle: { backgroundColor: "#6f8f6a" },
-                lightSquareStyle: { backgroundColor: "#eff2e6" },
-              }}
-            />
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-4 sm:p-6 lg:h-screen lg:flex-row lg:items-stretch lg:gap-6 lg:overflow-hidden lg:p-6">
+      {/* LEFT: board on top, game controls + moves below (moves scrolls internally) */}
+      <div className="flex w-full flex-1 flex-col items-center gap-4 lg:min-h-0">
+        {/* Captured-piece trays + eval bar + board */}
+        <div className="flex w-full max-w-[560px] flex-col gap-1.5">
+          {/* Trays sit inset by the eval-bar width (w-7) + gap (gap-3) = 40px, to align with the board. */}
+          <CapturedTray {...topTray} className="pl-10" />
+          <div className="flex items-stretch justify-center gap-3">
+            <EvalBar cp={evalCp} mate={evalMate} orientation={orientation} />
+            {/* On large screens size by height so the board always fits the viewport. */}
+            <div className="aspect-square w-full max-w-[520px] lg:h-[min(56vh,520px)] lg:w-auto">
+              <Chessboard
+                options={{
+                  id: "coach-board",
+                  position: fen,
+                  boardOrientation: orientation,
+                  onPieceDrop: handleDrop,
+                  allowDragging: canDrag,
+                  animationDurationInMs: 200,
+                  squareStyles,
+                  darkSquareStyle: { backgroundColor: "#6f8f6a" },
+                  lightSquareStyle: { backgroundColor: "#eff2e6" },
+                }}
+              />
+            </div>
           </div>
+          <CapturedTray {...bottomTray} className="pl-10" />
         </div>
-        <CapturedTray {...bottomTray} className="pl-10" />
+
+        {/* Game controls + moves below the board — moves scrolls internally. */}
+        <div className="flex w-full max-w-[560px] flex-col gap-3 lg:min-h-0 lg:flex-1">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[150px] flex-1 space-y-1">
+              <label className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                Difficulty
+              </label>
+              <select
+                value={difficulty}
+                onChange={(e) => setDifficulty(e.target.value as typeof difficulty)}
+                className="w-full rounded-md border border-neutral-300 bg-transparent px-3 py-2 text-sm dark:border-neutral-700"
+              >
+                {DIFFICULTIES.map((d) => (
+                  <option key={d.key} value={d.key}>
+                    {d.label} (skill {d.skill})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
+                Play as
+              </label>
+              <div className="flex gap-2">
+                {(["w", "b"] as const).map((c) => (
+                  <button
+                    key={c}
+                    onClick={() => chooseColor(c)}
+                    className={`rounded-md border px-3 py-2 text-sm transition ${
+                      playerColor === c
+                        ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900"
+                        : "border-neutral-300 dark:border-neutral-700"
+                    }`}
+                  >
+                    {c === "w" ? "White" : "Black"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <button
+              onClick={() => void newGame(playerColor)}
+              className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
+            >
+              New game
+            </button>
+          </div>
+
+          <MoveList moves={moves} onSelect={setReviewMove} className="lg:min-h-0 lg:flex-1" />
+        </div>
       </div>
 
-      {/* Controls + coaching */}
-      <aside className="flex w-full flex-col gap-5 lg:w-80">
+      {/* RIGHT: Coach — full height, scrolls internally so the board never moves */}
+      <aside className="flex w-full flex-col gap-4 lg:h-full lg:w-96 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
         <div>
           <h1 className="text-xl font-bold">Chess Coach</h1>
           <p className="text-sm text-neutral-500">{ready ? status : "Loading engines…"}</p>
@@ -369,55 +469,15 @@ export function ChessGame() {
 
         <CoachPanel assessment={assessment} onReview={setReviewMove} />
 
-        <div className="space-y-2">
-          <label className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
-            Difficulty
-          </label>
-          <select
-            value={difficulty}
-            onChange={(e) => setDifficulty(e.target.value as typeof difficulty)}
-            className="w-full rounded-md border border-neutral-300 bg-transparent px-3 py-2 text-sm dark:border-neutral-700"
-          >
-            {DIFFICULTIES.map((d) => (
-              <option key={d.key} value={d.key}>
-                {d.label} (skill {d.skill})
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
-            Play as
-          </label>
-          <div className="flex gap-2">
-            {(["w", "b"] as const).map((c) => (
-              <button
-                key={c}
-                onClick={() => chooseColor(c)}
-                className={`flex-1 rounded-md border px-3 py-2 text-sm transition ${
-                  playerColor === c
-                    ? "border-neutral-900 bg-neutral-900 text-white dark:border-neutral-100 dark:bg-neutral-100 dark:text-neutral-900"
-                    : "border-neutral-300 dark:border-neutral-700"
-                }`}
-              >
-                {c === "w" ? "White" : "Black"}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <button
-          onClick={() => void newGame(playerColor)}
-          className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
-        >
-          New game
-        </button>
-
-        <MoveList moves={moves} onSelect={setReviewMove} />
+        <CoachHint buildRequest={buildGuidanceRequest} canAsk={playerToMove} />
       </aside>
 
-      <ReviewModal move={reviewMove} playerColor={playerColor} onClose={() => setReviewMove(null)} />
+      <ReviewModal
+        move={reviewMove}
+        playerColor={playerColor}
+        level={level}
+        onClose={() => setReviewMove(null)}
+      />
     </div>
   );
 }
@@ -466,6 +526,65 @@ function CoachPanel({
         >
           ▶ Show me the better line
         </button>
+      )}
+    </div>
+  );
+}
+
+/** On-demand positional coaching for the current position — guides thinking
+ *  without revealing the engine's move. */
+function CoachHint({
+  buildRequest,
+  canAsk,
+}: {
+  buildRequest: () => CoachRequest;
+  canAsk: boolean;
+}) {
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [guidance, setGuidance] = useState<CoachGuidance | null>(null);
+
+  const ask = async () => {
+    setState("loading");
+    setGuidance(null);
+    try {
+      setGuidance(await fetchGuidance(buildRequest()));
+      setState("idle");
+    } catch {
+      setState("error");
+    }
+  };
+
+  return (
+    <div className="space-y-2 rounded-md border border-neutral-200 p-3 text-sm dark:border-neutral-800">
+      <button
+        onClick={ask}
+        disabled={!canAsk || state === "loading"}
+        className="w-full rounded-md bg-indigo-600 px-3 py-1.5 font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-40"
+      >
+        {state === "loading" ? "Thinking…" : "💡 Coach me — what should I think about?"}
+      </button>
+      {state === "loading" && (
+        <p className="animate-pulse text-neutral-400">Thinking through the position…</p>
+      )}
+      {state === "error" && (
+        <p className="text-neutral-400">Couldn&apos;t reach the coach. Try again.</p>
+      )}
+      {guidance && (
+        <div className="space-y-2">
+          <p className="font-semibold text-neutral-800 dark:text-neutral-200">{guidance.headline}</p>
+          {guidance.points.length > 0 && (
+            <ul className="list-disc space-y-1 pl-5 text-neutral-600 dark:text-neutral-400">
+              {guidance.points.map((p, i) => (
+                <li key={i}>{p}</li>
+              ))}
+            </ul>
+          )}
+          {guidance.question && (
+            <p className="rounded bg-indigo-50 px-2 py-1.5 italic text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300">
+              {guidance.question}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );
@@ -523,9 +642,11 @@ function SeverityMeter({ classification }: { classification: Classification }) {
 function MoveList({
   moves,
   onSelect,
+  className,
 }: {
   moves: ClassifiedMove[];
   onSelect: (m: ClassifiedMove) => void;
+  className?: string;
 }) {
   const rows: { n: number; white?: ClassifiedMove; black?: ClassifiedMove }[] = [];
   for (let i = 0; i < moves.length; i += 2) {
@@ -550,9 +671,9 @@ function MoveList({
   };
 
   return (
-    <div className="flex-1">
+    <div className={`flex min-h-0 flex-col ${className ?? ""}`}>
       <label className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Moves</label>
-      <div className="mt-2 max-h-64 overflow-y-auto rounded-md border border-neutral-200 text-sm dark:border-neutral-800">
+      <div className="mt-2 max-h-64 min-h-0 flex-1 overflow-y-auto rounded-md border border-neutral-200 text-sm dark:border-neutral-800 lg:max-h-none">
         {rows.length === 0 ? (
           <p className="px-3 py-2 text-neutral-400">No moves yet.</p>
         ) : (

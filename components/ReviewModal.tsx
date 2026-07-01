@@ -5,6 +5,7 @@ import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { uciToMove } from "@/lib/uci";
 import { CLASS_META, formatEval, type ClassifiedMove } from "@/lib/classify";
+import { fetchExplanation, type Level, type MoveExplanation } from "@/lib/llm";
 
 interface LineStep {
   fen: string;
@@ -39,16 +40,20 @@ const BASE_DELAY = 850;
 export function ReviewModal({
   move,
   playerColor,
+  level,
   onClose,
 }: {
   move: ClassifiedMove | null;
   playerColor: "w" | "b";
+  level: Level;
   onClose: () => void;
 }) {
   const [mode, setMode] = useState<Mode>("best");
   const [step, setStep] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
+  const [explain, setExplain] = useState<MoveExplanation | null>(null);
+  const [explainState, setExplainState] = useState<"idle" | "loading" | "error">("idle");
 
   // Reset whenever a different move is opened.
   useEffect(() => {
@@ -87,6 +92,45 @@ export function ReviewModal({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, steps.length]);
+
+  // Fetch the LLM explanation whenever a move is opened (cached in lib/llm).
+  useEffect(() => {
+    if (!move) {
+      setExplain(null);
+      setExplainState("idle");
+      return;
+    }
+    const sign = move.color === "w" ? 1 : -1;
+    const persp = (cp: number | null, mate: number | null) =>
+      formatEval(cp === null ? null : sign * cp, mate === null ? null : sign * mate);
+
+    const controller = new AbortController();
+    setExplain(null);
+    setExplainState("loading");
+    fetchExplanation(
+      {
+        fen: move.fenBefore,
+        sideToMove: move.color,
+        playedSan: move.san,
+        bestSan: move.bestSan,
+        classification: move.classification,
+        betterLine: bestSteps.slice(1).map((s) => s.san ?? "").filter(Boolean),
+        playedLine: playedSteps.slice(1).map((s) => s.san ?? "").filter(Boolean),
+        evalBefore: persp(move.evalBeforeCp, move.evalBeforeMate),
+        evalAfter: persp(move.evalAfterCp, move.evalAfterMate),
+        level,
+      },
+      controller.signal,
+    )
+      .then((r) => {
+        setExplain(r);
+        setExplainState("idle");
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setExplainState("error");
+      });
+    return () => controller.abort();
+  }, [move, level, bestSteps, playedSteps]);
 
   if (!move) return null;
 
@@ -205,6 +249,29 @@ export function ReviewModal({
             Scores are from {moverNoun === "you" ? "your" : "the engine's"} point of view — higher is
             better for {moverNoun}.
           </p>
+
+          {/* LLM explanation + reusable principle */}
+          <div className="rounded-md border border-neutral-200 p-3 dark:border-neutral-800">
+            <div className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">
+              Coach
+            </div>
+            {explainState === "loading" && (
+              <p className="animate-pulse text-sm text-neutral-400">Thinking through the position…</p>
+            )}
+            {explainState === "error" && (
+              <p className="text-sm text-neutral-400">Explanation unavailable right now.</p>
+            )}
+            {explain && (
+              <div className="space-y-2">
+                <p className="text-sm text-neutral-700 dark:text-neutral-300">{explain.explanation}</p>
+                {explain.principle && (
+                  <p className="rounded bg-emerald-50 px-2 py-1.5 text-sm text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">
+                    <span className="font-semibold">Principle:</span> {explain.principle}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
 
           {/* SAN line with clickable steps */}
           <div className="flex flex-wrap gap-1 text-sm">
