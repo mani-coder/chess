@@ -42,3 +42,6 @@ next-env.d.ts
 
 # playwright (local verification artifacts)
 /.playwright-mcp/
+
+# stockfish engine — copied from node_modules by scripts/copy-engine.mjs
+/public/stockfish/
