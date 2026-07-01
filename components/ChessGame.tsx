@@ -378,9 +378,9 @@ export function ChessGame() {
   };
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6 p-4 sm:p-6 lg:h-screen lg:flex-row lg:items-stretch lg:gap-6 lg:overflow-hidden lg:p-6">
-      {/* LEFT: board on top, game controls + moves below (moves scrolls internally) */}
-      <div className="flex w-full flex-1 flex-col items-center gap-4 lg:min-h-0">
+    <div className="mx-auto grid w-full max-w-6xl grid-cols-1 gap-4 p-4 sm:p-6 lg:h-screen lg:grid-cols-[1fr_22rem] lg:grid-rows-[auto_1fr] lg:gap-x-6 lg:gap-y-4 lg:overflow-hidden lg:p-6">
+      {/* BOARD — mobile: 1st · desktop: top-left */}
+      <section className="flex flex-col items-center lg:col-start-1 lg:row-start-1 lg:min-h-0">
         {/* Captured-piece trays + eval bar + board */}
         <div className="flex w-full max-w-[560px] flex-col gap-1.5">
           {/* Trays sit inset by the eval-bar width (w-7) + gap (gap-3) = 40px, to align with the board. */}
@@ -406,8 +406,22 @@ export function ChessGame() {
           </div>
           <CapturedTray {...bottomTray} className="pl-10" />
         </div>
+      </section>
 
-        {/* Game controls + moves below the board — moves scrolls internally. */}
+      {/* COACH / LLM — mobile: 2nd · desktop: right column, full height, scrolls internally */}
+      <aside className="flex flex-col gap-4 lg:col-start-2 lg:row-start-1 lg:row-span-2 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
+        <div>
+          <h1 className="text-xl font-bold">Chess Coach</h1>
+          <p className="text-sm text-neutral-500">{ready ? status : "Loading engines…"}</p>
+        </div>
+
+        <CoachPanel assessment={assessment} onReview={setReviewMove} />
+
+        <CoachHint buildRequest={buildGuidanceRequest} canAsk={playerToMove} />
+      </aside>
+
+      {/* SETTINGS — mobile: 3rd · desktop: bottom-left */}
+      <section className="flex min-h-0 flex-col items-center lg:col-start-1 lg:row-start-2">
         <div className="flex w-full max-w-[560px] flex-col gap-3 lg:min-h-0 lg:flex-1">
           <div className="flex flex-wrap items-end gap-3">
             <div className="min-w-[150px] flex-1 space-y-1">
@@ -458,19 +472,7 @@ export function ChessGame() {
 
           <MoveList moves={moves} onSelect={setReviewMove} className="lg:min-h-0 lg:flex-1" />
         </div>
-      </div>
-
-      {/* RIGHT: Coach — full height, scrolls internally so the board never moves */}
-      <aside className="flex w-full flex-col gap-4 lg:h-full lg:w-96 lg:min-h-0 lg:overflow-y-auto lg:pr-1">
-        <div>
-          <h1 className="text-xl font-bold">Chess Coach</h1>
-          <p className="text-sm text-neutral-500">{ready ? status : "Loading engines…"}</p>
-        </div>
-
-        <CoachPanel assessment={assessment} onReview={setReviewMove} />
-
-        <CoachHint buildRequest={buildGuidanceRequest} canAsk={playerToMove} />
-      </aside>
+      </section>
 
       <ReviewModal
         move={reviewMove}
@@ -524,7 +526,7 @@ function CoachPanel({
           onClick={() => onReview(assessment)}
           className="w-full rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
         >
-          ▶ Show me the better line
+          {isBest ? "▶ Watch how it plays out" : "▶ Show me the better line"}
         </button>
       )}
     </div>

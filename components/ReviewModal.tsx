@@ -224,7 +224,7 @@ export function ReviewModal({
                   : "text-neutral-600 dark:text-neutral-300"
               }`}
             >
-              Better line ({bestEval})
+              {move.classification === "best" ? "Best line" : "Better line"} ({bestEval})
             </button>
             <button
               onClick={() => setMode("played")}
