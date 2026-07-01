@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { callDeepSeekJSON, levelInstruction } from "@/lib/deepseek";
+import { callLLMJSON, levelInstruction } from "@/lib/llm-provider";
 
 interface ExplainRequest {
   fen: string;
@@ -54,7 +54,7 @@ Respond in JSON with exactly these fields:
     .join("\n");
 
   try {
-    const out = await callDeepSeekJSON(system, user);
+    const out = await callLLMJSON(system, user);
     const result = {
       explanation: String(out.explanation ?? "No explanation available."),
       principle: String(out.principle ?? ""),

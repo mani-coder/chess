@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { callDeepSeekJSON, levelInstruction } from "@/lib/deepseek";
+import { callLLMJSON, levelInstruction } from "@/lib/llm-provider";
 
 interface CoachRequest {
   fen: string;
@@ -44,7 +44,7 @@ Respond in JSON with exactly these fields:
     .join("\n");
 
   try {
-    const out = await callDeepSeekJSON(system, user);
+    const out = await callLLMJSON(system, user);
     const result = {
       headline: String(out.headline ?? "Look at the whole board before committing."),
       points: Array.isArray(out.points) ? out.points.map(String).slice(0, 3) : [],
