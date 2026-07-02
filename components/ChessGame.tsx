@@ -104,6 +104,7 @@ export function ChessGame() {
   const [thinking, setThinking] = useState(false);
   const [status, setStatus] = useState("Your move.");
   const [lastMove, setLastMove] = useState<{ from: string; to: string } | null>(null);
+  const [selected, setSelected] = useState<string | null>(null); // tap-to-move source square
   const [moves, setMoves] = useState<ClassifiedMove[]>([]);
   const [assessment, setAssessment] = useState<ClassifiedMove | null>(null);
   const [reviewMove, setReviewMove] = useState<ClassifiedMove | null>(null);
@@ -233,6 +234,7 @@ export function ChessGame() {
       setFen(gameRef.current.fen());
       setMoves([]);
       setLastMove(null);
+      setSelected(null);
       setAssessment(null);
       setReviewMove(null);
       setEvalCp(0);
@@ -278,20 +280,22 @@ export function ChessGame() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
 
-  const handleDrop = useCallback(
-    ({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string | null }): boolean => {
-      if (!targetSquare || thinking) return false;
+  // Core move handler shared by drag-and-drop and tap-to-move.
+  const tryMove = useCallback(
+    (from: string, to: string): boolean => {
+      if (thinking) return false;
       const g = gameRef.current;
       if (g.isGameOver() || g.turn() !== playerColorRef.current) return false;
 
       const fenBefore = g.fen();
       let mv;
       try {
-        mv = g.move({ from: sourceSquare as Square, to: targetSquare as Square, promotion: "q" });
+        mv = g.move({ from: from as Square, to: to as Square, promotion: "q" });
       } catch {
-        return false; // illegal → snap back
+        return false; // illegal → snap back / ignore
       }
 
+      setSelected(null);
       setFen(g.fen());
       setLastMove({ from: mv.from, to: mv.to });
       setStatus(describeStatus(g));
@@ -306,6 +310,36 @@ export function ChessGame() {
       return true;
     },
     [thinking, classifyAndRecord, runEngineReply, describeStatus],
+  );
+
+  const handleDrop = useCallback(
+    ({ sourceSquare, targetSquare }: { sourceSquare: string; targetSquare: string | null }): boolean =>
+      targetSquare ? tryMove(sourceSquare, targetSquare) : false,
+    [tryMove],
+  );
+
+  // Tap-to-move: tap a piece to select it, tap a destination to move there.
+  const handleSquareClick = useCallback(
+    ({ square, piece }: { square: string; piece: { pieceType: string } | null }) => {
+      const g = gameRef.current;
+      if (thinking || g.isGameOver() || g.turn() !== playerColorRef.current) return;
+      const isOwnPiece = !!piece && piece.pieceType[0] === playerColorRef.current;
+
+      if (selected) {
+        if (square === selected) {
+          setSelected(null); // tap the selected piece again → deselect
+        } else if (tryMove(selected, square)) {
+          // moved (tryMove clears selection)
+        } else if (isOwnPiece) {
+          setSelected(square); // switch selection to another of your pieces
+        } else {
+          setSelected(null); // tapped empty/illegal square → deselect
+        }
+        return;
+      }
+      if (isOwnPiece) setSelected(square);
+    },
+    [thinking, selected, tryMove],
   );
 
   const chooseColor = (color: PlayerColor) => {
@@ -332,6 +366,18 @@ export function ChessGame() {
       squareStyles[kingSquare] = gameRef.current.isCheckmate()
         ? { background: "rgba(220, 38, 38, 0.9)", boxShadow: "inset 0 0 0 3px #dc2626" }
         : { background: "rgba(220, 38, 38, 0.5)" };
+    }
+  }
+  // Tap-to-move: highlight the selected piece and dot its legal destinations.
+  if (selected) {
+    squareStyles[selected] = { background: "rgba(255, 213, 79, 0.6)" };
+    for (const m of gameRef.current.moves({ square: selected as Square, verbose: true })) {
+      squareStyles[m.to] = m.captured
+        ? { boxShadow: "inset 0 0 0 4px rgba(0,0,0,0.25)", borderRadius: "50%" }
+        : {
+            background:
+              "radial-gradient(circle, rgba(0,0,0,0.25) 22%, transparent 24%)",
+          };
     }
   }
 
@@ -395,6 +441,7 @@ export function ChessGame() {
                   position: fen,
                   boardOrientation: orientation,
                   onPieceDrop: handleDrop,
+                  onSquareClick: handleSquareClick,
                   allowDragging: canDrag,
                   animationDurationInMs: 200,
                   squareStyles,
