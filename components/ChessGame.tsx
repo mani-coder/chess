@@ -17,6 +17,7 @@ import {
   type Classification,
 } from "@/lib/classify";
 import { fetchGuidance, type Level, type CoachGuidance, type CoachRequest } from "@/lib/llm";
+import { saveGame, loadGame, clearGame, type SavedGame } from "@/lib/storage";
 
 /** Difficulty presets: opponent skill level + per-move think time. */
 const DIFFICULTIES = [
@@ -77,6 +78,47 @@ function computeCaptured(game: Chess) {
   };
 }
 
+type BoardArrow = { startSquare: string; endSquare: string; color: string };
+interface Illustration {
+  squares: string[];
+  arrows: BoardArrow[];
+}
+
+const HOVER_ARROW = "rgba(99, 102, 241, 0.9)";
+// Matches SAN moves (Nf3, exd5, O-O, e8=Q+, Kc3) and bare squares (d4).
+const CHESS_REF =
+  /\b(O-O-O|O-O|(?:[KQRBN][a-h]?[1-8]?|[a-h])?x?[a-h][1-8](?:=[QRBN])?[+#]?)\b/g;
+
+/**
+ * Parse coach text into board highlights: resolve any SAN move against the current
+ * position to draw a from→to arrow; otherwise highlight the referenced square.
+ */
+function illustratePoint(text: string, fen: string): Illustration {
+  const squares = new Set<string>();
+  const arrows: BoardArrow[] = [];
+  let chess: Chess;
+  try {
+    chess = new Chess(fen);
+  } catch {
+    return { squares: [], arrows: [] };
+  }
+  const legal = chess.moves({ verbose: true });
+
+  for (const match of text.matchAll(CHESS_REF)) {
+    const token = match[1];
+    const normalized = token.replace(/[+#]/g, "");
+    const move = legal.find((mv) => mv.san.replace(/[+#]/g, "") === normalized);
+    if (move) {
+      arrows.push({ startSquare: move.from, endSquare: move.to, color: HOVER_ARROW });
+      squares.add(move.to);
+    } else {
+      const square = token.match(/[a-h][1-8]/)?.[0];
+      if (square) squares.add(square);
+    }
+  }
+  return { squares: [...squares], arrows };
+}
+
 export function ChessGame() {
   // Two independent engines: the coach judges; the opponent plays.
   const coach = useEngine();
@@ -108,6 +150,14 @@ export function ChessGame() {
   const [moves, setMoves] = useState<ClassifiedMove[]>([]);
   const [assessment, setAssessment] = useState<ClassifiedMove | null>(null);
   const [reviewMove, setReviewMove] = useState<ClassifiedMove | null>(null);
+  const [resumePrompt, setResumePrompt] = useState<SavedGame | null>(null); // saved game awaiting a decision
+  const [hover, setHover] = useState<Illustration | null>(null); // coach-point board illustration
+  const bootedRef = useRef(false);
+
+  const illustrate = useCallback((text: string) => {
+    setHover(illustratePoint(text, gameRef.current.fen()));
+  }, []);
+  const clearIllustrate = useCallback(() => setHover(null), []);
 
   const [evalCp, setEvalCp] = useState(0);
   const [evalMate, setEvalMate] = useState<number | null>(null);
@@ -229,6 +279,7 @@ export function ChessGame() {
   /** Reset to a fresh game; if the player is Black, the engine opens. */
   const newGame = useCallback(
     async (color: PlayerColor) => {
+      clearGame(); // abandon any saved game
       playerColorRef.current = color;
       gameRef.current = new Chess();
       setFen(gameRef.current.fen());
@@ -274,11 +325,80 @@ export function ChessGame() {
     if (opponent.ready) void opponent.engineRef.current?.setSkillLevel(preset.skill);
   }, [opponent.ready, preset.skill, opponent.engineRef]);
 
-  // Start the opening position once both engines are ready.
+  /** Rebuild the UI from a saved game and reseed the coach eval (engines ready). */
+  const applySavedGame = useCallback(
+    async (s: SavedGame) => {
+      const color = s.playerColor;
+      const preset = DIFFICULTIES.find((d) => d.key === s.difficulty) ?? DIFFICULTIES[1];
+      playerColorRef.current = color;
+      setPlayerColor(color);
+      setDifficulty(preset.key);
+      gameRef.current = new Chess(s.fen);
+      setFen(s.fen);
+      setMoves(s.moves);
+      setLastMove(s.lastMove);
+      setSelected(null);
+      setReviewMove(null);
+      setEvalCp(s.evalCp);
+      setEvalMate(s.evalMate);
+      // Restore the coach panel to the player's most recent move.
+      const lastPlayerMove = [...s.moves].reverse().find((m) => m.color === color) ?? null;
+      setAssessment(lastPlayerMove);
+      setStatus(describeStatus(gameRef.current));
+
+      await opponent.engineRef.current?.setSkillLevel(preset.skill);
+      const snap = await coachAnalyze(gameRef.current.fen());
+      curEvalRef.current = snap;
+
+      // If it's the engine's turn in the restored position, let it move.
+      if (!gameRef.current.isGameOver() && gameRef.current.turn() !== color) {
+        setThinking(true);
+        await runEngineReply();
+        setThinking(false);
+      }
+    },
+    [opponent.engineRef, coachAnalyze, runEngineReply, describeStatus],
+  );
+
+  // Boot once engines are ready: resume a saved game (via dialog) or start fresh.
   useEffect(() => {
-    if (ready) void newGame(playerColor);
+    if (!ready || bootedRef.current) return;
+    bootedRef.current = true;
+    const saved = loadGame();
+    if (saved && saved.moves.length > 0) {
+      // Preview the saved position behind the dialog so the user can recognize it.
+      // (Visual only — engines are seeded in applySavedGame if they choose Resume.)
+      playerColorRef.current = saved.playerColor;
+      setPlayerColor(saved.playerColor);
+      const preset = DIFFICULTIES.find((d) => d.key === saved.difficulty);
+      if (preset) setDifficulty(preset.key);
+      gameRef.current = new Chess(saved.fen);
+      setFen(saved.fen);
+      setLastMove(saved.lastMove);
+      setMoves(saved.moves);
+      setEvalCp(saved.evalCp);
+      setEvalMate(saved.evalMate);
+      setResumePrompt(saved); // ask the user; don't fully start until they choose
+    } else {
+      void newGame(playerColor);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ready]);
+
+  // Persist the game after every change (once booted and not awaiting a choice).
+  useEffect(() => {
+    if (!bootedRef.current || resumePrompt || moves.length === 0) return;
+    saveGame({
+      fen,
+      playerColor,
+      difficulty,
+      moves,
+      evalCp,
+      evalMate,
+      lastMove,
+      updatedAt: Date.now(),
+    });
+  }, [fen, moves, playerColor, difficulty, evalCp, evalMate, lastMove, resumePrompt]);
 
   // Core move handler shared by drag-and-drop and tap-to-move.
   const tryMove = useCallback(
@@ -380,9 +500,16 @@ export function ChessGame() {
           };
     }
   }
+  // Coach illustration: ring the squares referenced by the hovered guidance point.
+  if (hover) {
+    for (const sq of hover.squares) {
+      squareStyles[sq] = { ...squareStyles[sq], boxShadow: "inset 0 0 0 4px rgba(99,102,241,0.9)" };
+    }
+  }
 
   const gameOver = gameRef.current.isGameOver();
-  const canDrag = ready && !thinking && !gameOver && gameRef.current.turn() === playerColor;
+  const canDrag =
+    ready && !thinking && !gameOver && !resumePrompt && gameRef.current.turn() === playerColor;
 
   // Captured pieces + material lead (recomputed from the current board each render).
   const captured = computeCaptured(gameRef.current);
@@ -397,7 +524,8 @@ export function ChessGame() {
 
   // Beginner/Casual → simpler coaching language; harder presets → intermediate.
   const level: Level = difficulty === "beginner" || difficulty === "casual" ? "beginner" : "intermediate";
-  const playerToMove = ready && !thinking && !gameOver && gameRef.current.turn() === playerColor;
+  const playerToMove =
+    ready && !thinking && !gameOver && !resumePrompt && gameRef.current.turn() === playerColor;
 
   // Build the current-position guidance request (lazily, at ask time) from the
   // coach's analysis of the current position (stored in curEvalRef).
@@ -444,6 +572,7 @@ export function ChessGame() {
                   onSquareClick: handleSquareClick,
                   allowDragging: canDrag,
                   animationDurationInMs: 200,
+                  arrows: hover?.arrows ?? [],
                   squareStyles,
                   darkSquareStyle: { backgroundColor: "#6f8f6a" },
                   lightSquareStyle: { backgroundColor: "#eff2e6" },
@@ -464,7 +593,12 @@ export function ChessGame() {
 
         <CoachPanel assessment={assessment} onReview={setReviewMove} />
 
-        <CoachHint buildRequest={buildGuidanceRequest} canAsk={playerToMove} />
+        <CoachHint
+          buildRequest={buildGuidanceRequest}
+          canAsk={playerToMove}
+          onIllustrate={illustrate}
+          onClear={clearIllustrate}
+        />
       </aside>
 
       {/* SETTINGS — mobile: 3rd · desktop: bottom-left */}
@@ -527,6 +661,43 @@ export function ChessGame() {
         level={level}
         onClose={() => setReviewMove(null)}
       />
+
+      {resumePrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-sm space-y-4 rounded-lg bg-white p-5 shadow-xl dark:bg-neutral-900">
+            <div>
+              <h2 className="text-lg font-bold">Resume your game?</h2>
+              <p className="mt-1 text-sm text-neutral-500">
+                You have a game in progress — {Math.ceil(resumePrompt.moves.length / 2)} moves,
+                playing as {resumePrompt.playerColor === "w" ? "White" : "Black"}. Continue where you
+                left off?
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => {
+                  const saved = resumePrompt;
+                  setResumePrompt(null);
+                  void applySavedGame(saved);
+                }}
+                className="flex-1 rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
+              >
+                Resume
+              </button>
+              <button
+                onClick={() => {
+                  setResumePrompt(null);
+                  clearGame();
+                  void newGame(playerColor);
+                }}
+                className="flex-1 rounded-md border border-neutral-300 px-4 py-2 text-sm font-semibold transition hover:bg-neutral-100 dark:border-neutral-700 dark:hover:bg-neutral-800"
+              >
+                New game
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -581,20 +752,27 @@ function CoachPanel({
 }
 
 /** On-demand positional coaching for the current position — guides thinking
- *  without revealing the engine's move. */
+ *  without revealing the engine's move. Hover/tap a line to see it on the board. */
 function CoachHint({
   buildRequest,
   canAsk,
+  onIllustrate,
+  onClear,
 }: {
   buildRequest: () => CoachRequest;
   canAsk: boolean;
+  onIllustrate: (text: string) => void;
+  onClear: () => void;
 }) {
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [guidance, setGuidance] = useState<CoachGuidance | null>(null);
+  const [pinned, setPinned] = useState<string | null>(null); // tapped line (mobile) stays lit
 
   const ask = async () => {
     setState("loading");
     setGuidance(null);
+    setPinned(null);
+    onClear();
     try {
       setGuidance(await fetchGuidance(buildRequest()));
       setState("idle");
@@ -602,6 +780,23 @@ function CoachHint({
       setState("error");
     }
   };
+
+  // Hover shows a line on the board; tap pins it (for touch); leaving reverts to the pin.
+  const lineHandlers = (text: string) => ({
+    onMouseEnter: () => onIllustrate(text),
+    onMouseLeave: () => (pinned ? onIllustrate(pinned) : onClear()),
+    onClick: () => {
+      if (pinned === text) {
+        setPinned(null);
+        onClear();
+      } else {
+        setPinned(text);
+        onIllustrate(text);
+      }
+    },
+    title: "Hover or tap to see it on the board",
+  });
+  const pinRing = (text: string) => (pinned === text ? " ring-2 ring-indigo-400" : "");
 
   return (
     <div className="space-y-2 rounded-md border border-neutral-200 p-3 text-sm dark:border-neutral-800">
@@ -620,19 +815,40 @@ function CoachHint({
       )}
       {guidance && (
         <div className="space-y-2">
-          <p className="font-semibold text-neutral-800 dark:text-neutral-200">{guidance.headline}</p>
+          <p
+            {...lineHandlers(guidance.headline)}
+            className={`-mx-1 cursor-pointer rounded px-1 font-semibold text-neutral-800 hover:bg-indigo-50 dark:text-neutral-200 dark:hover:bg-indigo-900/30${pinRing(
+              guidance.headline,
+            )}`}
+          >
+            {guidance.headline}
+          </p>
           {guidance.points.length > 0 && (
             <ul className="list-disc space-y-1 pl-5 text-neutral-600 dark:text-neutral-400">
               {guidance.points.map((p, i) => (
-                <li key={i}>{p}</li>
+                <li
+                  key={i}
+                  {...lineHandlers(p)}
+                  className={`cursor-pointer rounded px-1 hover:bg-indigo-50 dark:hover:bg-indigo-900/30${pinRing(
+                    p,
+                  )}`}
+                >
+                  {p}
+                </li>
               ))}
             </ul>
           )}
           {guidance.question && (
-            <p className="rounded bg-indigo-50 px-2 py-1.5 italic text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300">
+            <p
+              {...lineHandlers(guidance.question)}
+              className={`cursor-pointer rounded bg-indigo-50 px-2 py-1.5 italic text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300${pinRing(
+                guidance.question,
+              )}`}
+            >
               {guidance.question}
             </p>
           )}
+          <p className="text-xs text-neutral-400">Hover or tap a line to see it on the board.</p>
         </div>
       )}
     </div>
