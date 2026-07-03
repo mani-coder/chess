@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { callLLMJSON, levelInstruction } from "@/lib/llm-provider";
+import { describeBoard } from "@/lib/board-facts";
 
 // Reasoning models (e.g. Kimi) can take 10-15s; keep the function alive long enough.
 export const maxDuration = 60;
@@ -28,14 +29,18 @@ export async function POST(req: Request) {
 
   const side = body.sideToMove === "w" ? "White" : "Black";
   const system = `You are a patient chess coach who helps a player THINK for themselves — you never spoon-feed the move. You are given the engine's evaluation and its best line for the current position; the player is to move.
-CRITICAL RULE: Do NOT tell the player which move to play, and do NOT name any move from the engine's line. Instead, guide their thinking: what to notice on the board, which strategic ideas or plans matter here, and what to weigh. Use the engine's line only to keep your guidance sound — express it as strategy, never as the move. ${levelInstruction(body.level)}
+CRITICAL RULES:
+- Do NOT tell the player which move to play, and do NOT name any move from the engine's line. Guide their thinking: what to notice, which strategic ideas or plans matter, what to weigh. Use the engine's line only to keep your guidance sound — express it as strategy, never as the move.
+- Only mention pieces and pawns that appear in the "Board" list below. NEVER invent a piece, pawn, or square that is not listed. Refer to concrete squares (e.g. "your knight on d5") so the player can find them.
+${levelInstruction(body.level)}
 Respond in JSON with exactly these fields:
 "headline": one short sentence naming the single most important thing to focus on right now.
 "points": an array of 2-3 short, position-specific strategic ideas or things to evaluate (king safety, undeveloped pieces, weak squares, targets, pawn breaks, etc.).
 "question": one guiding question that nudges the player to find a strong move themselves.`;
 
   const user = [
-    `Position (FEN): ${body.fen}`,
+    `Board (ground truth — only reference these pieces):`,
+    describeBoard(body.fen),
     `It is ${side} to move — this is the player.`,
     `Current evaluation from the player's point of view: ${body.evalForPlayer} (higher is better for the player).`,
     body.bestLineSan.length
